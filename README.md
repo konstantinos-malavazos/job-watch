@@ -127,6 +127,12 @@ Each warns on stderr, prints the plain list on stdout and exits 0, so a bad API
 day never costs you the day's jobs. The API key is never written to stdout,
 stderr or the state file.
 
+**A batch that comes back short is retried.** The model occasionally returns
+valid JSON with fewer entries than it was given postings (16 of 17 observed on
+2026-11-05, which printed one real posting as unranked). The missing ids are
+resent once on their own; only if that also fails do they print unranked. Jobs
+from a batch that outright failed are not resent - that request already failed.
+
 ## Sources
 
 | ATS | Endpoint | Status |

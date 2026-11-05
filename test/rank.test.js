@@ -560,14 +560,17 @@ describe('rankJobs() batching', () => {
     assert.equal(result, null);
   });
 
-  test('a batch that silently drops entries is warned about', async () => {
+  test('a batch that silently drops entries is retried once and completed', async () => {
     const log = makeLog();
+    let calls = 0;
     const result = await rankJobs(manyJobs(20), 'p', {
       log,
       fetchImpl: async (_url, init) => {
+        calls += 1;
         const prompt = JSON.parse(init.body).messages[1].content;
         const postings = JSON.parse(prompt.slice(prompt.indexOf('['), prompt.lastIndexOf(']') + 1));
-        const short = postings.slice(0, 17).map((p) => ({ id: p.id, score: 4, rationale: 'x', red_flags: [] }));
+        const keep = calls === 1 ? 17 : postings.length;
+        const short = postings.slice(0, keep).map((p) => ({ id: p.id, score: 4, rationale: 'x', red_flags: [] }));
         return {
           ok: true,
           status: 200,
@@ -576,8 +579,47 @@ describe('rankJobs() batching', () => {
         };
       },
     });
+    assert.equal(calls, 2, 'the omitted ids are resent once');
+    assert.equal(result.size, 20, 'the three dropped postings are scored on the retry');
+    assert.ok(log.warns.some((w) => /returned no entry for 3 job\(s\)/.test(w)));
+  });
+
+  test('an omission the retry repeats still leaves those jobs unranked', async () => {
+    const log = makeLog();
+    let calls = 0;
+    const result = await rankJobs(manyJobs(20), 'p', {
+      log,
+      fetchImpl: async (_url, init) => {
+        calls += 1;
+        const prompt = JSON.parse(init.body).messages[1].content;
+        const postings = JSON.parse(prompt.slice(prompt.indexOf('['), prompt.lastIndexOf(']') + 1));
+        const short = postings.slice(0, Math.max(0, postings.length - 3))
+          .map((p) => ({ id: p.id, score: 4, rationale: 'x', red_flags: [] }));
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ choices: [{ message: { content: JSON.stringify({ rankings: short }) } }] }),
+          text: async () => '',
+        };
+      },
+    });
+    assert.equal(calls, 2, 'exactly one retry, never a loop');
     assert.equal(result.size, 17);
-    assert.ok(log.warns.some((w) => /returned 17 of 20 postings/.test(w)));
+    assert.ok(log.warns.some((w) => /scored 17 of 20 jobs/.test(w)));
+  });
+
+  test('jobs from a failed batch are not resent as omitted entries', async () => {
+    let calls = 0;
+    const score = scoringFetch([]);
+    await rankJobs(manyJobs(40), 'p', {
+      log: makeLog(),
+      fetchImpl: async (url, init) => {
+        calls += 1;
+        if (calls === 1) throw new Error('network down');
+        return score(url, init);
+      },
+    });
+    assert.equal(calls, 2, 'two batches, and no extra request for the failed one');
   });
 
   test('batches go out sequentially, not concurrently', async () => {
