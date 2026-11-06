@@ -41,7 +41,7 @@ One pipeline, in `job-watch` (the executable entry point), each stage a pure
 module in `lib/`:
 
 ```
-fetch → normalise → dedupe → first-seen → filter → collapse re-listings
+fetch → normalise → dedupe → first-seen → drop feed copies → filter → collapse re-listings
       → persist → rank → score cutoff → print
 ```
 
@@ -109,7 +109,26 @@ token, not the display name, so renaming a company in `sources.json` doesn't
 make all its postings look new. A job is new iff that tuple is absent from
 state; a changed title or date does not make it new.
 
-**State is written before ranking** (`job-watch:124`), so a ranker failure can't
+**A board posting the company's own feed already lists is skipped**
+(`dropFeedCopies(fresh, fetched)` in `lib/seen.js`, called at `job-watch:99`
+right after `selectNew`). The board copy has its own tuple, so dedupe cannot
+see it: in its first week Jobicy re-listed 34 Canonical roles already known
+from `greenhouse:canonical`. A new board job is dropped when a company feed
+posting **fetched in this run** has the same company token and title — token
+squashed to letters and digits, because two feed tokens are not the board slug
+(`grafanalabs` vs `grafana-labs`, `remotecom` vs `remote-com`); title lowercased
+with punctuation runs collapsed. A feed posting new today therefore suppresses
+its board copy today. Only this run's fetch counts, never state: state keeps a
+posting 90 days after it leaves its feed, and a role closed there (or whose
+feed was removed from `sources.json`) may live on only on the board. A feed
+that fails today lets a duplicate through rather than losing a role.
+The skipped job is in state and never re-evaluated. Never match on company
+alone: GitLab's "Backend Engineer, Knowledge Graph" was only on We Work Remotely
+and scored 8/10. Board-vs-board copies are kept, and a board that lists a role
+before the company feed does leaves the later feed copy reported as new; both
+accepted.
+
+**State is written before ranking** (`job-watch:133`), so a ranker failure can't
 cause the same jobs to be reported as new tomorrow. `selectNew()` is pure and
 returns the next state rather than mutating, which is what makes that correct.
 

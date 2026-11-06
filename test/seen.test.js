@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { dedupe, selectNew, emptyState, PRUNE_AFTER_DAYS } from '../lib/seen.js';
+import { dedupe, selectNew, emptyState, dropFeedCopies, PRUNE_AFTER_DAYS } from '../lib/seen.js';
 import * as greenhouse from '../lib/adapters/greenhouse.js';
 import * as lever from '../lib/adapters/lever.js';
 import * as jobicy from '../lib/adapters/jobicy.js';
@@ -272,5 +272,118 @@ describe('pruning entries that left their board', () => {
 
     assert.equal(counts.pruned, 0);
     assert.equal(Object.keys(nextState.jobs).length, 1);
+  });
+});
+
+describe('dropFeedCopies(): board copies of a company feed posting', () => {
+  const now = '2026-11-06T12:00:00.000Z';
+
+  // A state entry exactly as selectNew writes one.
+  function entry(ats, company_token, ats_job_id, title) {
+    return { first_seen: now, last_seen: now, ats, company_token, ats_job_id, title, url: 'u' };
+  }
+  function stateOf(...entries) {
+    const jobs = {};
+    for (const e of entries) jobs[`${e.ats}:${e.company_token}:${e.ats_job_id}`] = e;
+    return { version: 1, jobs };
+  }
+  const board = (overrides) => makeJob({ ats: 'jobicy', company: 'Canonical', company_token: 'canonical', ats_job_id: 'b1', ...overrides });
+  const feed = (overrides) => makeJob({ ats: 'greenhouse', company: 'Canonical', company_token: 'canonical', ats_job_id: '7', ...overrides });
+
+  test('a board job with the same company and title as a feed posting fetched this run is dropped', () => {
+    const job = board({ title: 'Senior Software Engineer' });
+    const fetched = [feed({ title: 'Senior Software Engineer' }), job];
+    const { jobs, skipped } = dropFeedCopies([job], fetched);
+
+    assert.deepEqual(jobs, []);
+    assert.deepEqual(skipped, [job]);
+  });
+
+  test('same company, different title is kept (company alone never matches)', () => {
+    const job = board({ ats: 'weworkremotely', company: 'GitLab', company_token: 'gitlab', title: 'Backend Engineer, Knowledge Graph' });
+    const fetched = [feed({ company: 'GitLab', company_token: 'gitlab', title: 'Backend Engineer, Verify' }), job];
+    const { jobs, skipped } = dropFeedCopies([job], fetched);
+
+    assert.deepEqual(jobs, [job]);
+    assert.deepEqual(skipped, []);
+  });
+
+  test('a feed token without the hyphen still matches the board slug (grafanalabs vs grafana-labs)', () => {
+    const job = board({ company: 'Grafana Labs', company_token: 'grafana-labs', title: 'Staff Engineer' });
+    const fetched = [feed({ company_token: 'grafanalabs', title: 'Staff Engineer' }), job];
+
+    assert.equal(dropFeedCopies([job], fetched).skipped.length, 1);
+  });
+
+  test('case and punctuation differences in the title still match', () => {
+    const job = board({ company: 'Acme', company_token: 'acme', title: 'senior software engineer - backend' });
+    const fetched = [feed({ ats: 'ashby', company_token: 'acme', title: 'Senior Software Engineer (Backend)' }), job];
+
+    assert.equal(dropFeedCopies([job], fetched).skipped.length, 1);
+  });
+
+  test('a company feed job is never dropped, even though its own key is among the feed keys', () => {
+    const job = feed({ title: 'Senior Software Engineer' });
+    const fetched = [job, board({ title: 'Senior Software Engineer' })];
+    const { jobs, skipped } = dropFeedCopies([job], fetched);
+
+    assert.deepEqual(jobs, [job]);
+    assert.deepEqual(skipped, []);
+  });
+
+  test('the same posting on two boards with no feed posting is kept on both', () => {
+    const a = board({ ats: 'jobicy', ats_job_id: 'b1', title: 'Platform Engineer' });
+    const b = board({ ats: 'remotive', ats_job_id: 'r1', title: 'Platform Engineer' });
+    const { jobs, skipped } = dropFeedCopies([a, b], [a, b]);
+
+    assert.deepEqual(jobs, [a, b]);
+    assert.deepEqual(skipped, []);
+  });
+
+  test('through selectNew: the skipped board job is still recorded as seen', () => {
+    const prior = stateOf(entry('greenhouse', 'canonical', '7', 'Senior Software Engineer'));
+    const feedJob = feed({ title: 'Senior Software Engineer' });
+    const boardJob = board({ title: 'Senior Software Engineer' });
+    const fetched = [feedJob, boardJob];
+    const { fresh, nextState } = selectNew(fetched, prior, now);
+    const { jobs, skipped } = dropFeedCopies(fresh, fetched);
+
+    assert.deepEqual(jobs, []);
+    assert.deepEqual(skipped, [boardJob]);
+    assert.ok(nextState.jobs['jobicy:canonical:b1'], 'board copy is in state, so it is never re-evaluated');
+  });
+
+  test('a feed posting new in the same run suppresses its board copy', () => {
+    const feedJob = feed({ ats: 'lever', company_token: 'doximity', title: 'Software Engineer' });
+    const boardJob = board({ ats: 'weworkremotely', company: 'Doximity', company_token: 'doximity', title: 'Software Engineer' });
+    const fetched = [boardJob, feedJob];
+    const { fresh } = selectNew(fetched, emptyState(), now);
+    const { jobs, skipped } = dropFeedCopies(fresh, fetched);
+
+    assert.deepEqual(jobs, [feedJob]);
+    assert.deepEqual(skipped, [boardJob]);
+  });
+
+  test('a feed posting only in prior state, not fetched this run, does not suppress a board copy', () => {
+    // Off its feed (filled, or the feed was removed from sources.json) but kept
+    // in state for up to PRUNE_AFTER_DAYS: the board copy may be the only listing.
+    const prior = stateOf(entry('greenhouse', 'canonical', '7', 'Senior Software Engineer'));
+    const boardJob = board({ title: 'Senior Software Engineer' });
+    const fetched = [boardJob];
+    const { fresh, nextState } = selectNew(fetched, prior, now);
+    assert.ok(nextState.jobs['greenhouse:canonical:7'], 'the feed entry is still in state');
+    const { jobs, skipped } = dropFeedCopies(fresh, fetched);
+
+    assert.deepEqual(jobs, [boardJob]);
+    assert.deepEqual(skipped, []);
+  });
+
+  test('is pure: neither argument is changed', () => {
+    const fresh = [board({ title: 'Senior Software Engineer' })];
+    const fetched = [feed({ title: 'Senior Software Engineer' }), ...fresh];
+    const before = JSON.stringify([fresh, fetched]);
+    dropFeedCopies(fresh, fetched);
+
+    assert.equal(JSON.stringify([fresh, fetched]), before);
   });
 });

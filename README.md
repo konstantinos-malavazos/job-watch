@@ -15,7 +15,8 @@ Personal use only. No auth, no scraping of logged-in sites, no republishing.
 ## Status
 
 Phase 1, and the pipeline now runs end to end for real. fetch → normalise →
-dedupe → persist → first-seen → filter → rank → print is implemented, covered
+dedupe → persist → first-seen → drop feed copies → filter → collapse
+re-listings → rank → score cutoff → print is implemented, covered
 by 185 offline tests, and **confirmed against live ATS feeds and a live ranked
 run** (2026-08-24: 2,643 postings from 15 boards, scored by deepseek-v4-pro).
 The remaining open item is the seed company list — see **Known gaps**.
@@ -237,6 +238,13 @@ does not make every one of its postings look brand new.
 **A job is new iff its tuple is absent from the state file.** A changed title
 or a changed `posted_at` does not make it new — retitled postings are the
 largest source of false positives in a watcher like this.
+
+**A board copy of a company's own posting is skipped.** When a remote-job board
+lists a role that the company's careers feed lists today — fetched in the same
+run, same company, same title, ignoring case and punctuation — the board copy
+is recorded as seen but not reported (`dropFeedCopies()` in `lib/seen.js`). A
+feed posting that has since closed, or that failed to fetch today, does not
+count, so a role that lives on only on the board is still reported.
 
 **State is written before ranking**, so a ranker failure cannot cause the same
 jobs to be reported as new again tomorrow. `--dry-run` skips the write entirely;

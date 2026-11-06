@@ -4,7 +4,7 @@
 // file and ATS_WATCH_* env vars are still read when the new ones are absent.)
 //
 // Pipeline: fetch -> normalise -> dedupe -> persist -> select first-seen
-//           -> filter -> collapse re-listings -> rank -> score cutoff -> print.
+//           -> drop feed copies -> filter -> collapse re-listings -> rank -> score cutoff -> print.
 //
 // STDOUT IS THE PRODUCT: a normal run prints a short digest and nothing else,
 // and prints nothing at all when there is no news. Everything diagnostic goes
@@ -16,7 +16,7 @@ import { parseCliArgs, HELP_TEXT } from './lib/args.js';
 import { makeLogger } from './lib/log.js';
 import { loadState, saveState, statePathsFor } from './lib/store.js';
 import { loadSources } from './lib/sources.js';
-import { selectNew, PRUNE_AFTER_DAYS } from './lib/seen.js';
+import { selectNew, dropFeedCopies, PRUNE_AFTER_DAYS } from './lib/seen.js';
 import { adapterFor } from './lib/adapters/index.js';
 import { politeSequential } from './lib/http.js';
 import { filterSince, applyLimit, filterByScore, filterTitles } from './lib/filter.js';
@@ -94,10 +94,18 @@ async function main() {
     log.info(`pruned ${counts.pruned} entr(y/ies) unseen for ${PRUNE_AFTER_DAYS}+ days`);
   }
 
+  // A board re-listing a posting the company's own feed lists in this run's
+  // fetch is not news. It is already in nextState, so it is never re-evaluated.
+  const { jobs: newJobs, skipped } = dropFeedCopies(fresh, fetched);
+  if (skipped.length) {
+    log.info(`skipped ${skipped.length} board posting(s) already listed on the company's own feed`);
+    for (const j of skipped) log.info(`  - ${j.company || j.company_token}: ${j.title} (${j.ats})`);
+  }
+
   // --- filter ------------------------------------------------------------
-  let selected = filterSince(fresh, opts.since);
-  if (opts.since && selected.length !== fresh.length) {
-    log.info(`--since ${opts.since} dropped ${fresh.length - selected.length} of ${fresh.length}`);
+  let selected = filterSince(newJobs, opts.since);
+  if (opts.since && selected.length !== newJobs.length) {
+    log.info(`--since ${opts.since} dropped ${newJobs.length - selected.length} of ${newJobs.length}`);
   }
 
   // Before the ranker, so the garbage costs no tokens. Everything it drops is
